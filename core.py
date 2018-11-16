@@ -1,0 +1,135 @@
+from __future__ import print_function
+
+from transport import BaseUDPTransport
+import struct
+from wire import *
+import array
+import state
+
+vote_count=0
+peer_count=0
+def on_append_entry_recieved(leader_id, term, prev_log_idx,
+                             prev_log_term, commit_idx, payload):
+    pass
+
+# server_obj=Server()
+def on_vote_recieved(*k):
+    global vote_count
+    vote_count+=1
+    print("Hell")
+    # if vote_count > peer_count/2:
+        
+
+        
+
+def on_vote_request(server_term,curr_term,server_log_idx,curr_log_idx):
+    if server_term>curr_term and server_log_idx>=curr_log_idx:
+        return True
+    else:
+        return False
+
+class PartialAppendEntry:
+    def __init__(self, dg_count):
+        self.payloads = [None] * dg_count
+
+    def add_first_segment(self, leader_id, term, prev_log_idx,
+                          prev_log_term, commit_idx, payload):
+        self.leader_id = leader_id
+        self.term = term
+        self.prev_log_idx = prev_log_idx
+        self.prev_log_term = prev_log_term
+        self.commit_idx = commit_idx
+        self.payloads[0] = payload
+        return all(self.payloads)
+
+    def add_partial_segment(self, index, payload):
+        self.payloads[index] = payload
+        return all(self.payloads)
+
+    def club_payloads(self):
+        return b''.join(self.payloads)
+
+
+fragmented_map = {}
+
+
+class RaftUdpTransport(BaseUDPTransport):
+
+    # def __init__(self, address, raft_engine):
+    #     self.raft_engine = raft_engine
+    def call_election(self):
+        h=pack_dgram_header(TYPE_REQUEST_VOTE,self.server_address[0],self.my.term)
+        b=pack_vote_request_struct(self.my.log_idx,self.my.term)
+        
+        for nodes in self.my.node_list: self.write(h+b,(nodes[0],nodes[1]))
+            #print(nodes[0],nodes[1])
+
+
+    def datagram_received(self, data, address):  # pylint:disable=method-hidden
+        _type, server_id, term = unpack_dgram_header(data)
+        # assert data_len == len(data)
+        if _type == TYPE_DATAGRAM_FRAGMENT:
+            dg_count, dg_id, dg_index = unpack_fragment_struct(data)
+            payload = data[FRAGMENTED_DG_PREAMBLE_SZ:]
+            pae = fragmented_map.get(dg_id, PartialAppendEntry(dg_count))
+            if pae.add_partial_segment(dg_index, payload):
+                fragmented_map.pop(dg_id, None)
+                on_append_entry_recieved(server_id, term,
+                                         pae.prev_log_idx,
+                                         pae.prev_log_term,
+                                         pae.commit_idx,
+                                         pae.club_payloads())
+
+        elif _type == TYPE_REQUEST_VOTE:
+            term,server_log_idx = unpack_vote_request_struct(data)
+            h = pack_dgram_header(TYPE_RESPONSE_VOTE,'10',0)
+            # if on_vote_request(term,self.my.term,server_log_idx,self.my.log_idx):
+            #     b = pack_vote_response_struct(True,)
+            #     self.my.term=term
+            # else:
+            b = pack_vote_response_struct(True,)
+            self.write(h+b,address)
+
+        elif _type == TYPE_RESPONSE_VOTE:
+            (voted,) = unpack_vote_response_struct(data)
+            if voted:
+                on_vote_recieved(server_id, term, voted)
+
+        elif _type == TYPE_REQUEST_APPENDENTRY:
+            (prev_log_idx, prev_log_term,
+             commit_idx, dg_count, dg_id) = unpack_appendentry_request_struct(data)
+            payload = data[APPEND_ENTRY_PREAMBLE_SZ:]
+
+            if dg_count == 0:
+                on_append_entry_recieved(server_id, term, prev_log_idx,
+                                         prev_log_term, commit_idx, payload)
+            else:
+                pae = fragmented_map.get(dg_id, PartialAppendEntry(dg_count))
+                if pae.add_first_segment(server_id, term, prev_log_idx,
+                                         prev_log_term, commit_idx, payload):
+                    fragmented_map.pop(dg_id, None)
+                    on_append_entry_recieved(server_id, term, prev_log_idx,
+                                             prev_log_term, 
+                                             commit_idx, pae.club_payloads())
+
+        elif _type == TYPE_RESPONSE_APPENDENTRY:
+            pass
+
+        else:
+            self.write(data, address)
+            # print(address)
+            raise ValueError("unknown type")
+
+    
+
+
+if __name__ == '__main__':
+    print('starting raft udp transport on :9000')
+    rt = RaftUdpTransport('127.0.0.1:8120')
+    # rt.register_timeoyt(10, when_timeout)
+    # rt.register_timeoyt(60, on_evey_minute)
+    rt.serve_forever()  # blocks
+    # do whatever with rt
+
+
+    
